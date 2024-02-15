@@ -1,0 +1,5 @@
+---
+version: 1.0.4
+title: multiple functions should be analyzed
+---
+[Diagnostic(message: "`bar` not defined", level: ErrorLevel), Diagnostic(message: "`barbaz` not defined", level: ErrorLevel)]

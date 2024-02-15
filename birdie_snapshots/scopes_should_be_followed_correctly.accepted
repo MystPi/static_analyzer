@@ -1,0 +1,5 @@
+---
+version: 1.0.4
+title: scopes should be followed correctly
+---
+[Diagnostic(message: "`b` never used", level: WarningLevel), Diagnostic(message: "`b` not defined", level: ErrorLevel)]

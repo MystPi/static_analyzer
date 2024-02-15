@@ -1,0 +1,5 @@
+---
+version: 1.0.4
+title: unused variables should generate diagnostics
+---
+[Diagnostic(message: "`baz` never used", level: WarningLevel), Diagnostic(message: "`foo` never used", level: WarningLevel), Diagnostic(message: "`bar` never used", level: WarningLevel)]

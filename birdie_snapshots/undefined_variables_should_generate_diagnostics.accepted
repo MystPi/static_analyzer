@@ -1,0 +1,5 @@
+---
+version: 1.0.4
+title: undefined variables should generate diagnostics
+---
+[Diagnostic(message: "`uhoh` not defined", level: ErrorLevel)]
