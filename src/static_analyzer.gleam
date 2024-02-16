@@ -52,6 +52,9 @@ pub type Diagnostic {
   Diagnostic(message: String, level: DiagnosticLevel)
 }
 
+type Diagnostics =
+  List(Diagnostic)
+
 pub type DiagnosticLevel {
   WarningLevel
   ErrorLevel
@@ -64,164 +67,178 @@ type VarMetadata {
   VarMetadata(usages: Int, publicity: glance.Publicity)
 }
 
-type State {
-  State(scopes: Scopes, diagnostics: List(Diagnostic))
-}
-
 // ANALYZERS -------------------------------------------------------------------
 
 fn analyze(module: glance.Module) -> List(Diagnostic) {
-  let state = State(scopes: [dict.new()], diagnostics: [])
+  let scopes = [dict.new()]
 
-  analyze_functions(module.functions, state)
+  analyze_functions(module.functions, scopes)
 }
 
 fn analyze_functions(
   functions: List(glance.Definition(glance.Function)),
-  state: State,
-) -> List(Diagnostic) {
-  list.flat_map(functions, analyze_function(_, state))
+  scopes: Scopes,
+) -> Diagnostics {
+  list.flat_map(functions, analyze_function(_, scopes))
 }
 
 fn analyze_function(
   function: glance.Definition(glance.Function),
-  state: State,
-) -> List(Diagnostic) {
+  scopes: Scopes,
+) -> Diagnostics {
   let glance.Definition(definition: function, ..) = function
 
-  let state =
-    list.fold(function.parameters, state, fn(state, param) {
+  let scopes =
+    list.fold(function.parameters, scopes, fn(scopes, param) {
       case param.name {
-        glance.Named(name) -> push_priv_var(state, name)
-        glance.Discarded(_) -> state
+        glance.Named(name) -> push_priv_var(scopes, name)
+        glance.Discarded(_) -> scopes
       }
     })
     |> push_var(function.name, function.publicity)
 
-  analyze_statements(function.body, state)
-  |> unused_vars
-  |> get_diagnostics
+  let #(scopes, diagnostics) = analyze_statements(function.body, scopes, [])
+
+  unused_vars(scopes, diagnostics)
 }
 
-/// @can-modify: diagnostics
-fn analyze_statements(statements: List(glance.Statement), state: State) -> State {
-  list.fold(statements, open_scope(state), fn(state, statement) {
-    analyze_statement(statement, state)
-  })
-  |> unused_vars
-  |> close_scope
+fn analyze_statements(
+  statements: List(glance.Statement),
+  scopes: Scopes,
+  diagnostics: Diagnostics,
+) -> #(Scopes, Diagnostics) {
+  let #(scopes, diagnostics) =
+    list.fold(
+      statements,
+      #(open_scope(scopes), diagnostics),
+      fn(prev, statement) { analyze_statement(statement, prev.0, prev.1) },
+    )
+
+  let diagnostics = unused_vars(scopes, diagnostics)
+
+  #(close_scope(scopes), diagnostics)
 }
 
-/// @can-modify: scopes diagnostics
-fn analyze_statement(statement: glance.Statement, state: State) -> State {
+fn analyze_statement(
+  statement: glance.Statement,
+  scopes: Scopes,
+  diagnostics: Diagnostics,
+) -> #(Scopes, Diagnostics) {
   case statement {
-    glance.Assignment(pattern: pattern, ..) -> analyze_pattern(pattern, state)
-    glance.Use(patterns: patterns, ..) -> analyze_patterns(patterns, state)
-    glance.Expression(expr) -> analyze_expression(expr, state)
+    glance.Assignment(pattern: pattern, ..) -> #(
+      analyze_pattern(pattern, scopes),
+      diagnostics,
+    )
+    glance.Use(patterns: patterns, ..) -> #(
+      analyze_patterns(patterns, scopes),
+      diagnostics,
+    )
+    glance.Expression(expr) -> analyze_expression(expr, scopes, diagnostics)
   }
 }
 
-/// @can-modify: scopes
-fn analyze_patterns(patterns: List(glance.Pattern), state: State) -> State {
-  list.fold(patterns, state, fn(state, pattern) {
-    analyze_pattern(pattern, state)
+fn analyze_patterns(patterns: List(glance.Pattern), scopes: Scopes) -> Scopes {
+  list.fold(patterns, scopes, fn(scopes, pattern) {
+    analyze_pattern(pattern, scopes)
   })
 }
 
-/// @can-modify: scopes
-fn analyze_pattern(pattern: glance.Pattern, state: State) -> State {
+fn analyze_pattern(pattern: glance.Pattern, scopes: Scopes) -> Scopes {
   case pattern {
-    glance.PatternVariable(name) -> push_priv_var(state, name)
-    glance.PatternTuple(patterns) -> analyze_patterns(patterns, state)
+    glance.PatternVariable(name) -> push_priv_var(scopes, name)
+    glance.PatternTuple(patterns) -> analyze_patterns(patterns, scopes)
     glance.PatternList(head_patterns, tail_pattern) ->
       analyze_patterns(
         case tail_pattern {
           option.Some(pattern) -> [pattern, ..head_patterns]
           option.None -> head_patterns
         },
-        state,
+        scopes,
       )
     glance.PatternAssignment(pattern, name) ->
-      analyze_pattern(pattern, state)
+      analyze_pattern(pattern, scopes)
       |> push_priv_var(name)
-    _ -> state
+    _ -> scopes
   }
 }
 
-/// @can-modify: diagnostics
 fn analyze_expressions(
   expressions: List(glance.Expression),
-  state: State,
-) -> State {
-  list.fold(expressions, state, fn(state, expression) {
-    analyze_expression(expression, state)
+  scopes: Scopes,
+  diagnostics: Diagnostics,
+) -> #(Scopes, Diagnostics) {
+  list.fold(expressions, #(scopes, diagnostics), fn(prev, expression) {
+    analyze_expression(expression, prev.0, prev.1)
   })
 }
 
-/// @can-modify: diagnostics
-fn analyze_expression(expression: glance.Expression, state: State) -> State {
+fn analyze_expression(
+  expression: glance.Expression,
+  scopes: Scopes,
+  diagnostics: Diagnostics,
+) -> #(Scopes, Diagnostics) {
   case expression {
-    glance.Variable(name) -> var_usage(state, name)
+    glance.Variable(name) -> var_usage(name, scopes, diagnostics)
     glance.NegateInt(expr) | glance.NegateBool(expr) ->
-      analyze_expression(expr, state)
-    glance.Block(statements) -> analyze_statements(statements, state)
-    glance.Tuple(exprs) -> analyze_expressions(exprs, state)
-    _ -> state
+      analyze_expression(expr, scopes, diagnostics)
+    glance.Block(statements) ->
+      analyze_statements(statements, scopes, diagnostics)
+    glance.Tuple(exprs) -> analyze_expressions(exprs, scopes, diagnostics)
+    _ -> #(scopes, diagnostics)
   }
 }
 
 // UTILS -----------------------------------------------------------------------
 
-/// @modifies: scopes
-fn push_var(state: State, var: String, publicity: glance.Publicity) -> State {
-  let assert [scope, ..rest] = state.scopes
-  let scopes = [
+fn push_var(scopes: Scopes, var: String, publicity: glance.Publicity) -> Scopes {
+  let assert [scope, ..rest] = scopes
+  [
     dict.insert(scope, var, VarMetadata(usages: 0, publicity: publicity)),
     ..rest
   ]
-
-  State(..state, scopes: scopes)
 }
 
-/// @modifies: scopes
-fn push_priv_var(state: State, var: String) -> State {
-  push_var(state, var, glance.Private)
+fn push_priv_var(scopes: Scopes, var: String) -> Scopes {
+  push_var(scopes, var, glance.Private)
 }
 
-/// @modifies: diagnostics
-fn push_diagnostic(state: State, diagnostic: Diagnostic) -> State {
-  State(..state, diagnostics: [diagnostic, ..state.diagnostics])
+fn push_diagnostic(
+  diagnostics: Diagnostics,
+  diagnostic: Diagnostic,
+) -> Diagnostics {
+  [diagnostic, ..diagnostics]
 }
 
-/// @modifies: diagnostics
-fn push_diagnostics(state: State, diagnostics: List(Diagnostic)) -> State {
-  State(..state, diagnostics: list.append(diagnostics, state.diagnostics))
+fn push_diagnostics(
+  existing: Diagnostics,
+  diagnostics: Diagnostics,
+) -> Diagnostics {
+  list.append(existing, diagnostics)
 }
 
-fn get_diagnostics(state: State) -> List(Diagnostic) {
-  state.diagnostics
+fn open_scope(scopes: Scopes) -> Scopes {
+  [dict.new(), ..scopes]
 }
 
-/// @modifies: scopes
-fn open_scope(state: State) -> State {
-  State(..state, scopes: [dict.new(), ..state.scopes])
+fn close_scope(scopes: Scopes) -> Scopes {
+  let assert [_, ..scopes] = scopes
+  scopes
 }
 
-/// @modifies: scopes
-fn close_scope(state: State) -> State {
-  let assert [_, ..scopes] = state.scopes
-  State(..state, scopes: scopes)
-}
-
-/// @can-modify: diagnostics scopes
-fn var_usage(state: State, var: String) -> State {
-  case verify_var_exists(state.scopes, var) {
-    True -> State(..state, scopes: increment_usage(state.scopes, var))
-    False ->
+fn var_usage(
+  var: String,
+  scopes: Scopes,
+  diagnostics: Diagnostics,
+) -> #(Scopes, Diagnostics) {
+  case verify_var_exists(scopes, var) {
+    True -> #(increment_usage(scopes, var), diagnostics)
+    False -> #(
+      scopes,
       push_diagnostic(
-        state,
+        diagnostics,
         Diagnostic("`" <> var <> "` not defined", ErrorLevel),
-      )
+      ),
+    )
   }
 }
 
@@ -249,18 +266,17 @@ fn increment_usage(scopes: Scopes, var: String) -> Scopes {
   }).1
 }
 
-/// @can-modify: diagnostics
-fn unused_vars(state: State) -> State {
-  let assert [scope, ..] = state.scopes
-  let diagnostics =
-    dict.fold(scope, [], fn(diagnostics, name, metadata) {
+fn unused_vars(scopes: Scopes, diagnostics: Diagnostics) -> Diagnostics {
+  let assert [scope, ..] = scopes
+  let detected =
+    dict.fold(scope, [], fn(detected, name, metadata) {
       case metadata {
         VarMetadata(usages: 0, publicity: glance.Private) -> [
           Diagnostic("`" <> name <> "` never used", WarningLevel),
-          ..diagnostics
+          ..detected
         ]
-        _ -> diagnostics
+        _ -> detected
       }
     })
-  push_diagnostics(state, diagnostics)
+  push_diagnostics(diagnostics, detected)
 }

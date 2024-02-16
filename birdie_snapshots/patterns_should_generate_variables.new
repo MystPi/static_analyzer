@@ -1,5 +1,0 @@
----
-version: 1.0.4
-title: patterns should generate variables
----
-[Diagnostic(message: "`z` never used", level: WarningLevel)]
