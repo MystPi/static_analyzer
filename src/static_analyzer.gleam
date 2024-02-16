@@ -99,7 +99,7 @@ fn analyze_function(
 
   let #(scopes, diagnostics) = analyze_statements(function.body, scopes, [])
 
-  unused_vars(scopes, diagnostics)
+  analyze_unused_vars(scopes, diagnostics)
 }
 
 fn analyze_statements(
@@ -114,7 +114,7 @@ fn analyze_statements(
       fn(prev, statement) { analyze_statement(statement, prev.0, prev.1) },
     )
 
-  let diagnostics = unused_vars(scopes, diagnostics)
+  let diagnostics = analyze_unused_vars(scopes, diagnostics)
 
   #(close_scope(scopes), diagnostics)
 }
@@ -178,7 +178,7 @@ fn analyze_expression(
   diagnostics: Diagnostics,
 ) -> #(Scopes, Diagnostics) {
   case expression {
-    glance.Variable(name) -> var_usage(name, scopes, diagnostics)
+    glance.Variable(name) -> analyze_var_usage(name, scopes, diagnostics)
     glance.NegateInt(expr) | glance.NegateBool(expr) ->
       analyze_expression(expr, scopes, diagnostics)
     glance.Block(statements) ->
@@ -188,44 +188,7 @@ fn analyze_expression(
   }
 }
 
-// UTILS -----------------------------------------------------------------------
-
-fn push_var(scopes: Scopes, var: String, publicity: glance.Publicity) -> Scopes {
-  let assert [scope, ..rest] = scopes
-  [
-    dict.insert(scope, var, VarMetadata(usages: 0, publicity: publicity)),
-    ..rest
-  ]
-}
-
-fn push_priv_var(scopes: Scopes, var: String) -> Scopes {
-  push_var(scopes, var, glance.Private)
-}
-
-fn push_diagnostic(
-  diagnostics: Diagnostics,
-  diagnostic: Diagnostic,
-) -> Diagnostics {
-  [diagnostic, ..diagnostics]
-}
-
-fn push_diagnostics(
-  existing: Diagnostics,
-  diagnostics: Diagnostics,
-) -> Diagnostics {
-  list.append(existing, diagnostics)
-}
-
-fn open_scope(scopes: Scopes) -> Scopes {
-  [dict.new(), ..scopes]
-}
-
-fn close_scope(scopes: Scopes) -> Scopes {
-  let assert [_, ..scopes] = scopes
-  scopes
-}
-
-fn var_usage(
+fn analyze_var_usage(
   var: String,
   scopes: Scopes,
   diagnostics: Diagnostics,
@@ -266,7 +229,7 @@ fn increment_usage(scopes: Scopes, var: String) -> Scopes {
   }).1
 }
 
-fn unused_vars(scopes: Scopes, diagnostics: Diagnostics) -> Diagnostics {
+fn analyze_unused_vars(scopes: Scopes, diagnostics: Diagnostics) -> Diagnostics {
   let assert [scope, ..] = scopes
   let detected =
     dict.fold(scope, [], fn(detected, name, metadata) {
@@ -279,4 +242,41 @@ fn unused_vars(scopes: Scopes, diagnostics: Diagnostics) -> Diagnostics {
       }
     })
   push_diagnostics(diagnostics, detected)
+}
+
+// UTILS -----------------------------------------------------------------------
+
+fn push_var(scopes: Scopes, var: String, publicity: glance.Publicity) -> Scopes {
+  let assert [scope, ..rest] = scopes
+  [
+    dict.insert(scope, var, VarMetadata(usages: 0, publicity: publicity)),
+    ..rest
+  ]
+}
+
+fn push_priv_var(scopes: Scopes, var: String) -> Scopes {
+  push_var(scopes, var, glance.Private)
+}
+
+fn push_diagnostic(
+  diagnostics: Diagnostics,
+  diagnostic: Diagnostic,
+) -> Diagnostics {
+  [diagnostic, ..diagnostics]
+}
+
+fn push_diagnostics(
+  existing: Diagnostics,
+  diagnostics: Diagnostics,
+) -> Diagnostics {
+  list.append(existing, diagnostics)
+}
+
+fn open_scope(scopes: Scopes) -> Scopes {
+  [dict.new(), ..scopes]
+}
+
+fn close_scope(scopes: Scopes) -> Scopes {
+  let assert [_, ..scopes] = scopes
+  scopes
 }
