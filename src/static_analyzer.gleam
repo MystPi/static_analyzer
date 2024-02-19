@@ -69,7 +69,7 @@ type VarMetadata {
 
 // ANALYZERS -------------------------------------------------------------------
 
-fn analyze(module: glance.Module) -> List(Diagnostic) {
+fn analyze(module: glance.Module) -> Diagnostics {
   let scopes = [dict.new()]
 
   analyze_functions(module.functions, scopes)
@@ -97,43 +97,41 @@ fn analyze_function(
     })
     |> push_var(function.name, function.publicity)
 
-  let #(scopes, diagnostics) = analyze_statements(function.body, scopes, [])
+  let #(scopes, d1) = analyze_statements(function.body, scopes)
+  let d2 = analyze_unused_vars(scopes)
 
-  analyze_unused_vars(scopes, diagnostics)
+  list.append(d2, d1)
 }
 
 fn analyze_statements(
   statements: List(glance.Statement),
   scopes: Scopes,
-  diagnostics: Diagnostics,
 ) -> #(Scopes, Diagnostics) {
-  let #(scopes, diagnostics) =
-    list.fold(
-      statements,
-      #(open_scope(scopes), diagnostics),
-      fn(prev, statement) { analyze_statement(statement, prev.0, prev.1) },
-    )
+  let #(scopes, d1) =
+    list.fold(statements, #(open_scope(scopes), []), fn(prev, statement) {
+      let #(scopes, diagnostics) = analyze_statement(statement, prev.0)
+      #(scopes, list.append(diagnostics, prev.1))
+    })
 
-  let diagnostics = analyze_unused_vars(scopes, diagnostics)
+  let d2 = analyze_unused_vars(scopes)
 
-  #(close_scope(scopes), diagnostics)
+  #(close_scope(scopes), list.append(d2, d1))
 }
 
 fn analyze_statement(
   statement: glance.Statement,
   scopes: Scopes,
-  diagnostics: Diagnostics,
 ) -> #(Scopes, Diagnostics) {
   case statement {
     glance.Assignment(pattern: pattern, ..) -> #(
       analyze_pattern(pattern, scopes),
-      diagnostics,
+      [],
     )
     glance.Use(patterns: patterns, ..) -> #(
       analyze_patterns(patterns, scopes),
-      diagnostics,
+      [],
     )
-    glance.Expression(expr) -> analyze_expression(expr, scopes, diagnostics)
+    glance.Expression(expr) -> analyze_expression(expr, scopes)
   }
 }
 
@@ -165,43 +163,31 @@ fn analyze_pattern(pattern: glance.Pattern, scopes: Scopes) -> Scopes {
 fn analyze_expressions(
   expressions: List(glance.Expression),
   scopes: Scopes,
-  diagnostics: Diagnostics,
 ) -> #(Scopes, Diagnostics) {
-  list.fold(expressions, #(scopes, diagnostics), fn(prev, expression) {
-    analyze_expression(expression, prev.0, prev.1)
+  list.fold(expressions, #(scopes, []), fn(prev, expression) {
+    let #(scopes, diagnostics) = analyze_expression(expression, prev.0)
+    #(scopes, list.append(diagnostics, prev.1))
   })
 }
 
 fn analyze_expression(
   expression: glance.Expression,
   scopes: Scopes,
-  diagnostics: Diagnostics,
 ) -> #(Scopes, Diagnostics) {
   case expression {
-    glance.Variable(name) -> analyze_var_usage(name, scopes, diagnostics)
+    glance.Variable(name) -> analyze_var_usage(name, scopes)
     glance.NegateInt(expr) | glance.NegateBool(expr) ->
-      analyze_expression(expr, scopes, diagnostics)
-    glance.Block(statements) ->
-      analyze_statements(statements, scopes, diagnostics)
-    glance.Tuple(exprs) -> analyze_expressions(exprs, scopes, diagnostics)
-    _ -> #(scopes, diagnostics)
+      analyze_expression(expr, scopes)
+    glance.Block(statements) -> analyze_statements(statements, scopes)
+    glance.Tuple(exprs) -> analyze_expressions(exprs, scopes)
+    _ -> #(scopes, [])
   }
 }
 
-fn analyze_var_usage(
-  var: String,
-  scopes: Scopes,
-  diagnostics: Diagnostics,
-) -> #(Scopes, Diagnostics) {
+fn analyze_var_usage(var: String, scopes: Scopes) -> #(Scopes, Diagnostics) {
   case verify_var_exists(scopes, var) {
-    True -> #(increment_usage(scopes, var), diagnostics)
-    False -> #(
-      scopes,
-      push_diagnostic(
-        diagnostics,
-        Diagnostic("`" <> var <> "` not defined", ErrorLevel),
-      ),
-    )
+    True -> #(increment_usage(scopes, var), [])
+    False -> #(scopes, [Diagnostic("`" <> var <> "` not defined", ErrorLevel)])
   }
 }
 
@@ -229,19 +215,17 @@ fn increment_usage(scopes: Scopes, var: String) -> Scopes {
   }).1
 }
 
-fn analyze_unused_vars(scopes: Scopes, diagnostics: Diagnostics) -> Diagnostics {
+fn analyze_unused_vars(scopes: Scopes) -> Diagnostics {
   let assert [scope, ..] = scopes
-  let detected =
-    dict.fold(scope, [], fn(detected, name, metadata) {
-      case metadata {
-        VarMetadata(usages: 0, publicity: glance.Private) -> [
-          Diagnostic("`" <> name <> "` never used", WarningLevel),
-          ..detected
-        ]
-        _ -> detected
-      }
-    })
-  push_diagnostics(diagnostics, detected)
+  dict.fold(scope, [], fn(detected, name, metadata) {
+    case metadata {
+      VarMetadata(usages: 0, publicity: glance.Private) -> [
+        Diagnostic("`" <> name <> "` never used", WarningLevel),
+        ..detected
+      ]
+      _ -> detected
+    }
+  })
 }
 
 // UTILS -----------------------------------------------------------------------
@@ -256,20 +240,6 @@ fn push_var(scopes: Scopes, var: String, publicity: glance.Publicity) -> Scopes 
 
 fn push_priv_var(scopes: Scopes, var: String) -> Scopes {
   push_var(scopes, var, glance.Private)
-}
-
-fn push_diagnostic(
-  diagnostics: Diagnostics,
-  diagnostic: Diagnostic,
-) -> Diagnostics {
-  [diagnostic, ..diagnostics]
-}
-
-fn push_diagnostics(
-  existing: Diagnostics,
-  diagnostics: Diagnostics,
-) -> Diagnostics {
-  list.append(existing, diagnostics)
 }
 
 fn open_scope(scopes: Scopes) -> Scopes {
